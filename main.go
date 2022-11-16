@@ -1,130 +1,93 @@
-// package main
-
-// import (
-// 	"fmt"
-// 	"log"
-// 	"net/http"
-
-// 	"github.com/gorilla/mux"
-// 	"github.com/gorilla/websocket"
-// )
-
-// type Message struct {
-// 	Greeting string `json:"greeting"`
-// }
-
-// var (
-// 	wsUpgrader = websocket.Upgrader{
-// 		ReadBufferSize:  1024,
-// 		WriteBufferSize: 1024,
-// 	}
-// 	wsConn *websocket.Conn
-// )
-
-// func WsEndpoint(w http.ResponseWriter, r *http.Request) {
-// 	wsUpgrader.CheckOrigin = func(r *http.Request) bool {
-// 		// check the http.reques
-// 		// make sure it's ok to acess
-// 		return true
-// 	}
-
-// 	wsConn, err := wsUpgrader.Upgrade(w, r, nil)
-// 	if err != nil {
-// 		fmt.Printf("could not upgrade : %s\n", err.Error())
-// 		return
-// 	}
-
-// 	defer wsConn.Close()
-
-// 	// event loop
-// 	for {
-// 		var msg Message
-
-// 		err := wsConn.ReadJSON(&msg)
-// 		if err != nil {
-// 			fmt.Printf("error reading json: %s\n", err.Error())
-// 			break
-// 		}
-
-// 		fmt.Printf("Message Received: %s\n", msg.Greeting)
-// 	}
-// }
-
-// func main() {
-// 	router := mux.NewRouter()
-
-// 	log.Fatal(http.ListenAndServe(":9100", router))
-
-// }
-
 package main
 
 import (
-	"fmt"
+	"flag"
 	"log"
-	"net/http"
 
-	"github.com/gorilla/mux"
-	"github.com/gorilla/websocket"
+	"github.com/gofiber/fiber"
+	"github.com/gofiber/websocket"
 )
 
-type Message struct {
-	Greeting string `json:"greeting"`
-}
+type client struct{} // Add more data to this type if needed
 
-var (
-	wsUpgrader = websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-	}
+var clients = make(map[*websocket.Conn]client) // Note: although large maps with pointer-like types (e.g. strings) as keys are slow, using pointers themselves as keys is acceptable and fast
+var register = make(chan *websocket.Conn)
+var broadcast = make(chan string)
+var unregister = make(chan *websocket.Conn)
 
-	wsConn *websocket.Conn
-)
-
-func WsEndpoint(w http.ResponseWriter, r *http.Request) {
-
-	wsUpgrader.CheckOrigin = func(r *http.Request) bool {
-		// check the http.Request
-		// make sure it's OK to access
-		return true
-	}
-	var err error
-	wsConn, err = wsUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		fmt.Printf("could not upgrade: %s\n", err.Error())
-		return
-	}
-
-	defer wsConn.Close()
-
-	// event loop
+func runHub() {
 	for {
-		var msg Message
+		select {
+		case connection := <-register:
+			clients[connection] = client{}
+			log.Println("connection registered")
 
-		err := wsConn.ReadJSON(&msg)
-		if err != nil {
-			fmt.Printf("error reading JSON: %s\n", err.Error())
-			break
+		case message := <-broadcast:
+			log.Println("message received:", message)
+
+			// Send the message to all clients
+			for connection := range clients {
+				if err := connection.WriteMessage(websocket.TextMessage, []byte(message)); err != nil {
+					log.Println("write error:", err)
+
+					unregister <- connection
+					connection.WriteMessage(websocket.CloseMessage, []byte{})
+					connection.Close()
+				}
+			}
+
+		case connection := <-unregister:
+			// Remove the client from the hub
+			delete(clients, connection)
+
+			log.Println("connection unregistered")
 		}
-
-		fmt.Printf("Message Received: %s\n", msg.Greeting)
-		SendMessage("Hello, Client!:YOur Message" + msg.Greeting)
-	}
-}
-
-func SendMessage(msg string) {
-	err := wsConn.WriteMessage(websocket.TextMessage, []byte(msg))
-	if err != nil {
-		fmt.Printf("error sending message: %s\n", err.Error())
 	}
 }
 
 func main() {
+	app := fiber.New()
 
-	router := mux.NewRouter()
+	app.Static("/", "./home.html")
 
-	router.HandleFunc("/socket", WsEndpoint)
+	app.Use(func(c *fiber.Ctx) {
+		if websocket.IsWebSocketUpgrade(c) { // Returns true if the client requested upgrade to the WebSocket protocol
+			c.Next()
+		}
+	})
 
-	log.Fatal(http.ListenAndServe(":9100", router))
+	go runHub()
 
+	app.Get("/ws/:id", websocket.New(func(c *websocket.Conn) {
+		// When the function returns, unregister the client and close the connection
+		defer func() {
+			unregister <- c
+			c.Close()
+		}()
+
+		// Register the client
+		register <- c
+
+		for {
+			messageType, message, err := c.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Println("read error:", err)
+				}
+
+				return // Calls the deferred function, i.e. closes the connection on error
+			}
+
+			if messageType == websocket.TextMessage {
+				// Broadcast the received message
+				broadcast <- string(message)
+			} else {
+				log.Println("websocket message received of type", messageType)
+			}
+		}
+	}))
+
+	addr := flag.String("addr", ":9100", "http service address")
+	flag.Parse()
+	app.Listen(*addr)
 }

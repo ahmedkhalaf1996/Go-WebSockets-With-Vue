@@ -3,6 +3,8 @@
   <form :action="sendMessage" @click.prevent="onSubmit">
     <input v-model="message" type="text" >
     <input type="submit" value="Send" @click="sendMessage">
+    <h1>room</h1>
+    <input type="text"  placeholder="room" v-model="getChangeRoom"/>
   </form>
   <!-- <p>
     Two way data binding is fun!
@@ -28,16 +30,31 @@ export default {
       message: "",
       socket: null,
       rcvMessage: "",
-      showMsg: true
+      showMsg: true,
+      getChangeRoom :"",
+    }
+  },
+  watch:{
+    getChangeRoom(){
+      this.connect()
     }
   },
   mounted() {
-    this.socket = new WebSocket("ws://localhost:9100/socket")
+    
+    // this.socket = new WebSocket("ws://localhost:9100/ws/123")
+    // this.socket.onmessage = (msg) => {
+    //   this.acceptMsg(msg)
+    // }
+  },
+  methods: {
+
+    connect(){
+      this.socket = new WebSocket(`ws://localhost:9100/ws/${this.getChangeRoom}`)
     this.socket.onmessage = (msg) => {
       this.acceptMsg(msg)
     }
-  },
-  methods: {
+    },
+
     sendMessage() {
       let msg = {
         "greeting": this.message
